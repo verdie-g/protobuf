@@ -838,6 +838,51 @@ class StructTest(unittest.TestCase):
       s2['x'] = s1['x']
       self.assertEqual(s1['x'], s2['x'])
 
+    dictionary = {
+        'key1': 5.0,
+        'key2': 'abc',
+        'key3': {'subkey': 11.0, 'k': False},
+    }
+    msg = more_messages_pb2.WKTMessage()
+    msg.optional_struct = dictionary
+    self.assertEqual(msg.optional_struct, dictionary)
+
+  def testListValueAssignment(self):
+    list_value = [6, 'seven', True, False, None, {}]
+    msg = more_messages_pb2.WKTMessage()
+    msg.optional_list_value = list_value
+    self.assertEqual(msg.optional_list_value, list_value)
+
+  def testStructConstruction(self):
+    dictionary = {
+        'key1': 5.0,
+        'key2': 'abc',
+        'key3': {'subkey': 11.0, 'k': False},
+    }
+    list_value = [6, 'seven', True, False, None, dictionary]
+    msg = more_messages_pb2.WKTMessage(
+        optional_struct=dictionary, optional_list_value=list_value
+    )
+    self.assertEqual(len(msg.optional_struct), len(dictionary))
+    self.assertEqual(msg.optional_struct, dictionary)
+    self.assertEqual(len(msg.optional_list_value), len(list_value))
+    self.assertEqual(msg.optional_list_value, list_value)
+
+  def testSpecialStructConstruct(self):
+    dictionary = {'key1': 6.0}
+    msg = more_messages_pb2.WKTMessage(optional_struct=dictionary)
+    self.assertEqual(msg.optional_struct, dictionary)
+
+    dictionary2 = {'fields': 7.0}
+    msg2 = more_messages_pb2.WKTMessage(optional_struct=dictionary2)
+    self.assertEqual(msg2.optional_struct, dictionary2)
+
+    # Construct Struct as normal message
+    value_msg = struct_pb2.Value(number_value=5.0)
+    dictionary3 = {'fields': {'key1': value_msg}}
+    msg3 = more_messages_pb2.WKTMessage(optional_struct=dictionary3)
+    self.assertEqual(msg3.optional_struct, {'key1': 5.0})
+
   def testMergeFrom(self):
     struct = struct_pb2.Struct()
     struct_class = struct.__class__

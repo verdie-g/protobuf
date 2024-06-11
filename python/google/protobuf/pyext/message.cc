@@ -1089,8 +1089,24 @@ int InitAttributes(CMessage* self, PyObject* args, PyObject* kwargs) {
       if (PyDict_Check(value)) {
         // Make the message exist even if the dict is empty.
         AssureWritable(cmessage);
-        if (InitAttributes(cmessage, nullptr, value) < 0) {
-          return -1;
+        if (descriptor->message_type()->well_known_type() ==
+            Descriptor::WELLKNOWNTYPE_STRUCT) {
+          ScopedPyObjectPtr ok(PyObject_CallMethod(
+              reinterpret_cast<PyObject*>(cmessage), "update", "O", value));
+          if (ok.get() == nullptr && PyDict_Size(value) == 1 &&
+              PyDict_Contains(value, PyUnicode_FromString("fields"))) {
+            // Fallback to init as normal message field.
+            PyErr_Clear();
+            PyObject* tmp = Clear(cmessage);
+            Py_DECREF(tmp);
+            if (InitAttributes(cmessage, nullptr, value) < 0) {
+              return -1;
+            }
+          }
+        } else {
+          if (InitAttributes(cmessage, nullptr, value) < 0) {
+            return -1;
+          }
         }
       } else {
         if (PyObject_TypeCheck(value, CMessage_Type)) {
@@ -1115,6 +1131,15 @@ int InitAttributes(CMessage* self, PyObject* args, PyObject* kwargs) {
               ScopedPyObjectPtr ok(
                   PyObject_CallMethod(reinterpret_cast<PyObject*>(cmessage),
                                       "FromTimedelta", "O", value));
+              if (ok.get() == nullptr) {
+                return -1;
+              }
+              break;
+            }
+            case Descriptor::WELLKNOWNTYPE_LISTVALUE: {
+              AssureWritable(cmessage);
+              ScopedPyObjectPtr ok(PyObject_CallMethod(
+                  reinterpret_cast<PyObject*>(cmessage), "extend", "O", value));
               if (ok.get() == nullptr) {
                 return -1;
               }
@@ -2040,6 +2065,15 @@ static PyObject* RichCompare(CMessage* self, PyObject* other, int opid) {
     Py_INCREF(Py_NotImplemented);
     return Py_NotImplemented;
   }
+
+  const Descriptor* self_descriptor = self->message->GetDescriptor();
+  Descriptor::WellKnownType wkt = self_descriptor->well_known_type();
+  if ((wkt == Descriptor::WELLKNOWNTYPE_LISTVALUE && PyList_Check(other)) ||
+      (wkt == Descriptor::WELLKNOWNTYPE_STRUCT && PyDict_Check(other))) {
+    return PyObject_CallMethod(reinterpret_cast<PyObject*>(self),
+                               "_internal_compare", "O", other);
+  }
+
   // If other is not a message, this implementation doesn't know how to perform
   // comparisons.
   if (!PyObject_TypeCheck(other, CMessage_Type)) {
@@ -2051,8 +2085,7 @@ static PyObject* RichCompare(CMessage* self, PyObject* other, int opid) {
   const google::protobuf::Message* other_message =
       reinterpret_cast<CMessage*>(other)->message;
   // If messages don't have the same descriptors, they are not equal.
-  if (equals &&
-      self->message->GetDescriptor() != other_message->GetDescriptor()) {
+  if (equals && self_descriptor != other_message->GetDescriptor()) {
     equals = false;
   }
   // Check the message contents.
@@ -2586,26 +2619,22 @@ int SetFieldValue(CMessage* self, const FieldDescriptor* field_descriptor,
     return -1;
   } else if (field_descriptor->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
     switch (field_descriptor->message_type()->well_known_type()) {
-      case Descriptor::WELLKNOWNTYPE_TIMESTAMP: {
-        AssureWritable(self);
-        PyObject* sub_message = GetFieldValue(self, field_descriptor);
-        ScopedPyObjectPtr ok(
-            PyObject_CallMethod(sub_message, "FromDatetime", "O", value));
-        if (ok.get() == nullptr) {
-          return -1;
-        }
-        return 0;
-      }
-      case Descriptor::WELLKNOWNTYPE_DURATION: {
-        AssureWritable(self);
-        PyObject* sub_message = GetFieldValue(self, field_descriptor);
-        ScopedPyObjectPtr ok(
-            PyObject_CallMethod(sub_message, "FromTimedelta", "O", value));
-        if (ok.get() == nullptr) {
-          return -1;
-        }
-        return 0;
-      }
+#define HANDLE_WKT(TYPE, PY_METHOD)                                \
+  case Descriptor::WELLKNOWNTYPE_##TYPE: {                         \
+    AssureWritable(self);                                          \
+    PyObject* sub_message = GetFieldValue(self, field_descriptor); \
+    ScopedPyObjectPtr ok(                                          \
+        PyObject_CallMethod(sub_message, #PY_METHOD, "O", value)); \
+    if (ok.get() == nullptr) {                                     \
+      return -1;                                                   \
+    }                                                              \
+    return 0;                                                      \
+  }
+      HANDLE_WKT(TIMESTAMP, FromDatetime)
+      HANDLE_WKT(DURATION, FromTimedelta)
+      HANDLE_WKT(STRUCT, update)
+      HANDLE_WKT(LISTVALUE, extend)
+#undef HANDLE_WKT
       default:
         PyErr_Format(PyExc_AttributeError,
                      "Assignment not allowed to "

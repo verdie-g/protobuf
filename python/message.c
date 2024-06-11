@@ -432,6 +432,8 @@ err:
   return ok;
 }
 
+static PyObject* PyUpb_Message_Clear(PyUpb_Message* self);
+
 static bool PyUpb_Message_InitMessageAttribute(PyObject* _self, PyObject* name,
                                                const upb_FieldDef* field,
                                                PyObject* value) {
@@ -445,7 +447,20 @@ static bool PyUpb_Message_InitMessageAttribute(PyObject* _self, PyObject* name,
     Py_XDECREF(tmp);
   } else if (PyDict_Check(value)) {
     assert(!PyErr_Occurred());
-    ok = PyUpb_Message_InitAttributes(submsg, NULL, value) >= 0;
+    const upb_MessageDef* msgdef = upb_FieldDef_MessageSubDef(field);
+    if (upb_MessageDef_WellKnownType(msgdef) == kUpb_WellKnown_Struct) {
+      ok = PyObject_CallMethod(submsg, "update", "O", value);
+      if (!ok && PyDict_Size(value) == 1 &&
+          PyDict_Contains(value, PyUnicode_FromString("fields"))) {
+        // Fall back to init as normal message field.
+        PyErr_Clear();
+        PyObject* tmp = PyUpb_Message_Clear((PyUpb_Message*)submsg);
+        Py_DECREF(tmp);
+        ok = PyUpb_Message_InitAttributes(submsg, NULL, value) >= 0;
+      }
+    } else {
+      ok = PyUpb_Message_InitAttributes(submsg, NULL, value) >= 0;
+    }
   } else {
     const upb_MessageDef* msgdef = upb_FieldDef_MessageSubDef(field);
     switch (upb_MessageDef_WellKnownType(msgdef)) {
@@ -455,6 +470,10 @@ static bool PyUpb_Message_InitMessageAttribute(PyObject* _self, PyObject* name,
       }
       case kUpb_WellKnown_Duration: {
         ok = PyObject_CallMethod(submsg, "FromTimedelta", "O", value);
+        break;
+      }
+      case kUpb_WellKnown_ListValue: {
+        ok = PyObject_CallMethod(submsg, "extend", "O", value);
         break;
       }
       default: {
@@ -772,6 +791,13 @@ static PyObject* PyUpb_Message_RichCompare(PyObject* _self, PyObject* other,
     Py_INCREF(Py_NotImplemented);
     return Py_NotImplemented;
   }
+  const upb_MessageDef* msgdef = _PyUpb_Message_GetMsgdef(self);
+  upb_WellKnown wkt = upb_MessageDef_WellKnownType(msgdef);
+  if ((wkt == kUpb_WellKnown_ListValue && PyList_Check(other)) ||
+      (wkt == kUpb_WellKnown_Struct && PyDict_Check(other))) {
+    return PyObject_CallMethod(_self, "_internal_compare", "O", other);
+  }
+
   if (!PyObject_TypeCheck(other, Py_TYPE(self))) {
     Py_INCREF(Py_NotImplemented);
     return Py_NotImplemented;
@@ -963,22 +989,19 @@ int PyUpb_Message_SetFieldValue(PyObject* _self, const upb_FieldDef* field,
   if (upb_FieldDef_IsSubMessage(field)) {
     const upb_MessageDef* msgdef = upb_FieldDef_MessageSubDef(field);
     switch (upb_MessageDef_WellKnownType(msgdef)) {
-      case kUpb_WellKnown_Timestamp: {
-        PyObject* sub_message = PyUpb_Message_GetFieldValue(_self, field);
-        PyObject* ok =
-            PyObject_CallMethod(sub_message, "FromDatetime", "O", value);
-        if (!ok) return -1;
-        Py_DECREF(ok);
-        return 0;
-      }
-      case kUpb_WellKnown_Duration: {
-        PyObject* sub_message = PyUpb_Message_GetFieldValue(_self, field);
-        PyObject* ok =
-            PyObject_CallMethod(sub_message, "FromTimedelta", "O", value);
-        if (!ok) return -1;
-        Py_DECREF(ok);
-        return 0;
-      }
+#define HANDLE_WKT(TYPE, PY_METHOD)                                          \
+  case kUpb_WellKnown_##TYPE: {                                              \
+    PyObject* sub_message = PyUpb_Message_GetFieldValue(_self, field);       \
+    PyObject* ok = PyObject_CallMethod(sub_message, #PY_METHOD, "O", value); \
+    if (!ok) return -1;                                                      \
+    Py_DECREF(ok);                                                           \
+    return 0;                                                                \
+  }
+      HANDLE_WKT(Timestamp, FromDatetime)
+      HANDLE_WKT(Duration, FromTimedelta)
+      HANDLE_WKT(Struct, update)
+      HANDLE_WKT(ListValue, extend)
+#undef HANDLE_WKT
       default:
         PyErr_Format(exc,
                      "Assignment not allowed to message "
@@ -1271,8 +1294,6 @@ PyObject* PyUpb_Message_MergeFrom(PyObject* self, PyObject* arg) {
   Py_XDECREF(ret);
   Py_RETURN_NONE;
 }
-
-static PyObject* PyUpb_Message_Clear(PyUpb_Message* self);
 
 static PyObject* PyUpb_Message_CopyFrom(PyObject* _self, PyObject* arg) {
   if (_self->ob_type != arg->ob_type) {

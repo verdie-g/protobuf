@@ -550,6 +550,20 @@ class Struct(object):
   def __iter__(self):
     return iter(self.fields)
 
+  def _internal_compare(self, other):
+    size = len(self)
+    if size != len(other):
+      return False
+    for key, value in self.items():
+      if key not in other:
+        return False
+      if isinstance(other[key], (dict, list)):
+        if not value._internal_compare(other[key]):
+          return False
+      elif value != other[key]:
+        return False
+    return True
+
   def keys(self):  # pylint: disable=invalid-name
     return self.fields.keys()
 
@@ -604,6 +618,18 @@ class ListValue(object):
 
   def __delitem__(self, key):
     del self.values[key]
+
+  def _internal_compare(self, other):
+    size = len(self)
+    if size != len(other):
+      return False
+    for i in range(size):
+      if isinstance(other[i], (dict, list)):
+        if not self[i]._internal_compare(other[i]):
+          return False
+      elif self[i] != other[i]:
+        return False
+    return True
 
   def items(self):
     for i in range(len(self)):
